@@ -542,9 +542,16 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
   })}`);
 }
 
+const RETIRED_CLIENT_UUIDS = new Set([
+  // HostDZire - LAX (23.80.90.34) was permanently handed off on 2026-07-18.
+  '87d4a2b7-18a3-403e-bdd1-324b892a2617',
+]);
+
 async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise<void> {
   const notifications = await db.listOfflineNotifications(context.database, true);
-  const enabled: OfflineNotification[] = notifications.filter(item => item.enable);
+  const enabled: OfflineNotification[] = notifications.filter(
+    item => item.enable && !RETIRED_CLIENT_UUIDS.has(item.client),
+  );
   if (enabled.length === 0) return;
 
   const settings = await context.getAdminSettings();
