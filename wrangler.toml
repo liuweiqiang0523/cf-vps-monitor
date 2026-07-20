@@ -36,7 +36,9 @@ tag = "v2"
 new_sqlite_classes = ["RateLimitDO"]
 
 [vars]
-SUPABASE_URL = "https://PROJECT_REF.supabase.co"
+# Personal deployment database. Keep this real URL in the fork so Cloudflare
+# Workers Builds can deploy automatically after syncing upstream updates.
+SUPABASE_URL = "https://xkddpcnqqkvxslvorfud.supabase.co"
 
 [assets]
 directory = "frontend/dist"
