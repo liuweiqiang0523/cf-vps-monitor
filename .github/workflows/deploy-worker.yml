@@ -1,0 +1,101 @@
+name: Sync Upstream and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cf-vps-monitor-production
+  cancel-in-progress: false
+
+jobs:
+  sync-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PRODUCTION_URL: https://cf.oknm.de
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Sync official upstream
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/kadidalax/cf-vps-monitor.git
+          git fetch upstream main
+
+          before="$(git rev-parse HEAD)"
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort || true
+            echo "Official upstream conflicts with personal fork changes; refusing to overwrite them." >&2
+            exit 1
+          fi
+          after="$(git rev-parse HEAD)"
+
+          if [[ "$before" != "$after" ]]; then
+            git push origin HEAD:main
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "commit=$after" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and deploy Worker
+        run: npm run deploy
+
+      - name: Verify production
+        shell: bash
+        env:
+          DEPLOY_COMMIT: ${{ steps.sync.outputs.commit }}
+        run: |
+          set -euo pipefail
+          expected_short="${DEPLOY_COMMIT:0:7}"
+
+          for attempt in {1..12}; do
+            ping="$(curl --fail --silent --show-error --max-time 15 "$PRODUCTION_URL/ping" || true)"
+            version_json="$(curl --fail --silent --show-error --max-time 15 "$PRODUCTION_URL/api/version" || true)"
+            online_build="$(printf '%s' "$version_json" | node -e '
+              let body = "";
+              process.stdin.on("data", chunk => body += chunk);
+              process.stdin.on("end", () => {
+                try { process.stdout.write(JSON.parse(body).build || ""); }
+                catch { process.stdout.write(""); }
+              });
+            ')"
+
+            if [[ "$ping" == "pong" && "$online_build" == "$expected_short" ]]; then
+              echo "Production verified at $PRODUCTION_URL ($online_build)."
+              exit 0
+            fi
+
+            echo "Waiting for production propagation (attempt $attempt/12, ping=$ping, build=$online_build)..."
+            sleep 10
+          done
+
+          echo "Production did not converge to commit $expected_short." >&2
+          exit 1
